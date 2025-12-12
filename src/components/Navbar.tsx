@@ -1,11 +1,12 @@
 import { Link, useLocation } from "react-router-dom";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { Wallet, Moon, Sun, Menu, X } from "lucide-react";
+import { Wallet, Moon, Sun, Menu, X, ShieldAlert } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { UserMenu } from "./UserMenu";
+import { getContractOwner } from "@/lib/dispute";
 
 const Navbar = () => {
   const location = useLocation();
@@ -14,6 +15,33 @@ const Navbar = () => {
   const { userData, connectWallet, disconnectWallet } = useAuth();
   const { t } = useTranslation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [isOwner, setIsOwner] = useState(false);
+
+  useEffect(() => {
+    const checkAccess = async () => {
+      if (!userData) {
+        setIsOwner(false);
+        return;
+      }
+
+      try {
+        const owner = await getContractOwner();
+        // In testnet, we compare with testnet address
+        const userAddress = userData.profile.stxAddress.testnet;
+
+        if (owner === userAddress) {
+          setIsOwner(true);
+        } else {
+          setIsOwner(false);
+        }
+      } catch (error) {
+        console.error("Error checking owner:", error);
+        setIsOwner(false);
+      }
+    };
+
+    checkAccess();
+  }, [userData]);
 
   return (
     <nav className="fixed top-0 left-0 right-0 z-40 bg-background/80 backdrop-blur-xl border-b border-border">
@@ -69,6 +97,17 @@ const Navbar = () => {
                   {t('nav.myBookings')}
                 </Link>
               </>
+            )}
+
+            {/* Admin Link */}
+            {isOwner && (
+              <Link
+                to="/admin/disputes"
+                className="text-sm font-medium text-red-500 hover:text-red-600 transition-smooth flex items-center gap-1"
+              >
+                <ShieldAlert className="w-4 h-4" />
+                Disputes
+              </Link>
             )}
           </div>
 
@@ -153,6 +192,17 @@ const Navbar = () => {
                     {t('nav.myBookings')}
                   </Link>
                 </>
+              )}
+
+              {isOwner && (
+                <Link
+                  to="/admin/disputes"
+                  onClick={() => setMobileOpen(false)}
+                  className="text-sm font-medium text-red-500 flex items-center gap-2"
+                >
+                  <ShieldAlert className="w-4 h-4" />
+                  Disputes
+                </Link>
               )}
 
               <div className="flex items-center gap-2 pt-2 border-t border-border/50">
