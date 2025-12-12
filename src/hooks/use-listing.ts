@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "./use-auth";
+import { useBadges } from "./use-badge";
 import { listProperty } from "@/lib/escrow";
 import { useToast } from "./use-toast";
 import { openContractCall } from "@stacks/connect";
@@ -27,6 +29,8 @@ export interface ListingFormData {
 export function useListing() {
     const { userData } = useAuth();
     const { toast } = useToast();
+    const queryClient = useQueryClient();
+    const { refetchBadges } = useBadges();
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
 
@@ -258,6 +262,25 @@ export function useListing() {
                             title: "Success!",
                             description: `Property #${propertyId} has been listed successfully! You may have earned a 'First Listing' badge.`,
                         });
+
+                        // Refresh badges to show newly earned First Listing badge
+                        // Wait a bit for propagation
+                        console.log('⏳ Waiting for node propagation before fetching badges...');
+                        setTimeout(async () => {
+                            console.log('🎖️ Refreshing badges after successful listing...');
+                            await refetchBadges();
+
+                            toast({
+                                title: "New Badge Unlocked! 🏆",
+                                description: "You've earned the 'Property Pioneer' badge for listing your first property.",
+                                className: "bg-primary text-primary-foreground border-none",
+                            });
+                        }, 3000);
+
+                        // Invalidate property queries to refresh dashboard
+                        console.log('🔄 Invalidating property queries...');
+                        queryClient.invalidateQueries({ queryKey: ['user-properties'] });
+                        queryClient.invalidateQueries({ queryKey: ['host-bookings'] });
 
                     } catch (confirmError) {
                         console.error('Error during confirmation:', confirmError);

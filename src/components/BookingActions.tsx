@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -12,17 +12,13 @@ import {
     AlertDialogTitle,
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipProvider,
-    TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
+import { useBadges } from "@/hooks/use-badge";
 import { openContractCall } from "@stacks/connect";
 import { releasePayment, cancelBooking, type Booking } from "@/lib/escrow";
-import { CheckCircle, XCircle, Clock, DollarSign, AlertTriangle, HelpCircle, MessageSquare } from "lucide-react";
+import { getTransactionStatus } from "@/lib/stacks-api";
+import { CheckCircle, XCircle, Clock, DollarSign, AlertTriangle, Loader2, MessageSquare, ArrowRight, ExternalLink } from "lucide-react";
 import { ReviewForm } from "@/components/ReviewForm";
 
 interface BookingActionsProps {
@@ -33,10 +29,6 @@ interface BookingActionsProps {
 
 /**
  * Calculate refund percentage based on blocks until check-in
- * Matches smart contract logic:
- * - 1008+ blocks (7 days): 100% refund
- * - 432-1008 blocks (3-7 days): 50% refund
- * - <432 blocks (3 days): 0% refund
  */
 function calculateRefundPercentage(blocksUntilCheckIn: number): number {
     if (blocksUntilCheckIn >= 1008) return 100;
@@ -45,16 +37,56 @@ function calculateRefundPercentage(blocksUntilCheckIn: number): number {
 }
 
 /**
- * Convert blocks to approximate days (144 blocks per day)
+ * Convert blocks to approximate days and hours
  */
-function blocksToDays(blocks: number): number {
-    return Math.floor(blocks / 144);
+function blocksToTime(blocks: number): { days: number; hours: number } {
+    const totalMinutes = blocks * 10; // ~10 min per block
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    return { days, hours };
 }
 
 export function BookingActions({ booking, currentBlockHeight, onSuccess }: BookingActionsProps) {
     const { userData } = useAuth();
     const { toast } = useToast();
+    const { refetchBadges } = useBadges();
     const [isProcessing, setIsProcessing] = useState(false);
+    const [txId, setTxId] = useState<string | null>(null);
+    const [isCompleted, setIsCompleted] = useState(false);
+
+    // Poll for transaction status
+    useEffect(() => {
+        if (!txId) return;
+
+        const pollInterval = setInterval(async () => {
+            const status = await getTransactionStatus(txId);
+            console.log(`🔄 Polling tx ${txId}: ${status}`);
+
+            if (status === "success") {
+                clearInterval(pollInterval);
+                setTxId(null);
+                setIsCompleted(true); // Immediate UI update
+                toast({
+                    title: "Transaction Confirmed! 🎉",
+                    description: "Your payment has been released and booking completed.",
+                });
+
+                // Refresh data
+                await refetchBadges();
+                onSuccess?.();
+            } else if (status === "abort" || status === "failed") {
+                clearInterval(pollInterval);
+                setTxId(null);
+                toast({
+                    title: "Transaction Failed",
+                    description: "The transaction was aborted or failed.",
+                    variant: "destructive",
+                });
+            }
+        }, 5000); // Check every 5 seconds
+
+        return () => clearInterval(pollInterval);
+    }, [txId, toast, refetchBadges, onSuccess]);
 
     if (!userData) return null;
 
@@ -62,11 +94,22 @@ export function BookingActions({ booking, currentBlockHeight, onSuccess }: Booki
     const isHost = userAddress === booking.host;
     const isGuest = userAddress === booking.guest;
     const blocksUntilCheckIn = Math.max(0, booking.checkIn - currentBlockHeight);
-    const daysUntilCheckIn = blocksToDays(blocksUntilCheckIn);
-    const canRelease = (isHost || isGuest) && booking.status === "confirmed" && currentBlockHeight >= booking.checkIn && booking.escrowedAmount > 0;
-    const canCancel = (isHost || isGuest) && booking.status === "confirmed" && currentBlockHeight < booking.checkIn && booking.escrowedAmount > 0;
+    const timeUntilCheckIn = blocksToTime(blocksUntilCheckIn);
+
+    // Handle status as both string and object
+    const bookingStatus = typeof booking.status === 'string' ? booking.status : (booking.status as any)?.value || 'unknown';
+
+    const canRelease = (isHost || isGuest) && bookingStatus === "confirmed" && currentBlockHeight >= booking.checkIn && booking.escrowedAmount > 0;
+    const canCancel = (isHost || isGuest) && bookingStatus === "confirmed" && currentBlockHeight < booking.checkIn && booking.escrowedAmount > 0;
     const refundPercentage = calculateRefundPercentage(blocksUntilCheckIn);
     const refundAmount = (booking.totalAmount / 1_000_000) * (refundPercentage / 100);
+
+    // DEBUG: Log button state
+    console.log('✅ Release Button:', canRelease ? 'ENABLED (GREEN)' : 'DISABLED (GRAY)', {
+        bookingId: booking.id,
+        bookingStatus,
+        canRelease
+    });
 
     const handleReleasePayment = async () => {
         setIsProcessing(true);
@@ -76,11 +119,18 @@ export function BookingActions({ booking, currentBlockHeight, onSuccess }: Booki
             await openContractCall({
                 ...contractCallOptions,
                 onFinish: async (data) => {
+                    setTxId(data.txId);
                     toast({
-                        title: "Payment Released! 🎉",
-                        description: `Funds transferred to host. You may have earned a new badge!`,
+                        title: "Transaction Broadcasted",
+                        description: "Payment release is processing on the blockchain. This may take a few minutes.",
                     });
+
+                    // Refresh badges to show newly earned First Booking badge
+                    console.log('🎖️ Refreshing badges after payment release...');
+                    await refetchBadges();
+
                     onSuccess?.();
+                    setIsProcessing(false);
                 },
                 onCancel: () => {
                     toast({
@@ -137,166 +187,226 @@ export function BookingActions({ booking, currentBlockHeight, onSuccess }: Booki
     };
 
     return (
-        <div className="flex flex-col gap-2">
-            {/* Status Badge */}
-            <div className="flex items-center gap-2">
-                {booking.status === "confirmed" && (
-                    <Badge variant="secondary" className="bg-blue-500/10 text-blue-500">
-                        <Clock className="w-3 h-3 mr-1" />
-                        Confirmed
-                    </Badge>
+        <div className="w-full space-y-3">
+            {/* Status Section */}
+            <div className="flex flex-col gap-2 p-4 bg-muted/30 rounded-lg border border-border/50">
+                <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground">Booking Status</span>
+                    {booking.status === "confirmed" && (
+                        <Badge variant="secondary" className="bg-blue-500/10 text-blue-500">
+                            <Clock className="w-3 h-3 mr-1" />
+                            Confirmed
+                        </Badge>
+                    )}
+                    {booking.status === "completed" && (
+                        <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-500">
+                            <CheckCircle className="w-3 h-3 mr-1" />
+                            Completed
+                        </Badge>
+                    )}
+                    {booking.status === "cancelled" && (
+                        <Badge variant="secondary" className="bg-red-500/10 text-red-500">
+                            <XCircle className="w-3 h-3 mr-1" />
+                            Cancelled
+                        </Badge>
+                    )}
+                </div>
+
+                {booking.escrowedAmount > 0 && (
+                    <div className="flex items-center justify-between text-sm">
+                        <span className="text-muted-foreground">In Escrow</span>
+                        <span className="font-bold text-emerald-600 flex items-center gap-1">
+                            <DollarSign className="w-4 h-4" />
+                            {(booking.escrowedAmount / 1_000_000).toFixed(2)} STX
+                        </span>
+                    </div>
                 )}
-                {booking.status === "completed" && (
-                    <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-500">
-                        <CheckCircle className="w-3 h-3 mr-1" />
-                        Completed
-                    </Badge>
-                )}
-                {booking.status === "cancelled" && (
-                    <Badge variant="secondary" className="bg-red-500/10 text-red-500">
-                        <XCircle className="w-3 h-3 mr-1" />
-                        Cancelled
-                    </Badge>
+
+                {booking.status === "confirmed" && blocksUntilCheckIn > 0 && (
+                    <div className="pt-2 border-t border-border/30 space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">Check-in in</span>
+                            <span className="font-medium">
+                                {timeUntilCheckIn.days > 0 && `${timeUntilCheckIn.days}d `}
+                                {timeUntilCheckIn.hours}h
+                                <span className="text-muted-foreground ml-1">
+                                    (~{blocksUntilCheckIn} blocks)
+                                </span>
+                            </span>
+                        </div>
+                        <div className="w-full bg-muted rounded-full h-1.5">
+                            <div
+                                className="bg-primary h-1.5 rounded-full transition-all duration-500"
+                                style={{ width: `${Math.min(100, (1 - blocksUntilCheckIn / (booking.checkIn - booking.createdAt)) * 100)}%` }}
+                            />
+                        </div>
+                    </div>
                 )}
             </div>
 
-            {/* Countdown for confirmed bookings */}
-            {booking.status === "confirmed" && blocksUntilCheckIn > 0 && (
-                <p className="text-xs text-muted-foreground">
-                    Check-in in ~{daysUntilCheckIn} {daysUntilCheckIn === 1 ? "day" : "days"}
-                </p>
-            )}
+            {/* Action Buttons - ALWAYS VISIBLE */}
+            <div className="space-y-2">
+                {/* Release Payment / Claim Payout Button */}
+                {!isCompleted && bookingStatus !== "completed" && (
+                    <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                            <Button
+                                size="lg"
+                                className={`w-full ${canRelease && !txId ? 'gradient-hero' : 'bg-slate-200 dark:bg-muted hover:bg-slate-300 dark:hover:bg-muted text-slate-700 dark:text-muted-foreground cursor-not-allowed border border-slate-300 dark:border-border'}`}
+                                disabled={!canRelease || isProcessing || !!txId}
+                            >
+                                {txId ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 mr-2 animate-spin text-primary" />
+                                        Transaction Pending...
+                                    </>
+                                ) : isProcessing ? (
+                                    <>
+                                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                        Processing...
+                                    </>
+                                ) : canRelease ? (
+                                    <>
+                                        {isHost ? (
+                                            <>
+                                                <DollarSign className="w-4 h-4 mr-2" />
+                                                Claim Payout
+                                            </>
+                                        ) : (
+                                            <>
+                                                <CheckCircle className="w-4 h-4 mr-2" />
+                                                Release Payment to Host
+                                            </>
+                                        )}
+                                        <ArrowRight className="w-4 h-4 ml-2" />
+                                    </>
+                                ) : (
+                                    <>
+                                        <Clock className="w-4 h-4 mr-2" />
+                                        Waiting for Check-in ({blocksUntilCheckIn} blocks)
+                                    </>
+                                )}
+                            </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>
+                                    {isHost ? "Claim Payout?" : "Release Payment to Host?"}
+                                </AlertDialogTitle>
+                                <AlertDialogDescription className="space-y-2">
+                                    <p>
+                                        {isHost
+                                            ? `This will transfer ${(booking.hostPayout / 1_000_000).toFixed(2)} STX to your wallet.`
+                                            : `This will release ${(booking.hostPayout / 1_000_000).toFixed(2)} STX to the host.`
+                                        }
+                                        {" "}
+                                        <strong>{(booking.platformFee / 1_000_000).toFixed(2)} STX</strong> will be paid as platform fee.
+                                    </p>
+                                    <p className="text-xs text-muted-foreground">
+                                        The booking will be marked as completed and {isHost ? "you" : "you may"} earn a badge.
+                                    </p>
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                <AlertDialogAction onClick={handleReleasePayment} disabled={isProcessing} className="gradient-hero">
+                                    {isProcessing ? "Processing..." : (isHost ? "Confirm Payout" : "Confirm Release")}
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
+                )}
 
-            {/* Escrowed amount display */}
-            {booking.escrowedAmount > 0 && (
-                <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    <DollarSign className="w-3 h-3" />
-                    {(booking.escrowedAmount / 1_000_000).toFixed(2)} STX in escrow
-                </p>
-            )}
+                {/* Pending Transaction Link */}
+                {txId && (
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full text-xs text-muted-foreground"
+                        asChild
+                    >
+                        <a
+                            href={`https://explorer.hiro.so/tx/${txId}?chain=testnet`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            <ExternalLink className="w-3 h-3 mr-2" />
+                            View Transaction
+                        </a>
+                    </Button>
+                )}
 
-            {/* Action Buttons */}
-            <div className="flex flex-col gap-2 mt-2">
-                <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-muted-foreground">Actions</span>
-                    <TooltipProvider>
-                        <Tooltip>
-                            <TooltipTrigger>
-                                <HelpCircle className="w-3 h-3 text-muted-foreground/70" />
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">
-                                <div className="space-y-2 text-xs">
-                                    <p><strong>1. Booking:</strong> Funds are locked in escrow.</p>
-                                    <p><strong>2. Check-in (Automatic):</strong> Wait for the check-in block to pass. No action needed.</p>
-                                    <p><strong>3. Release (Manual):</strong> After check-in, click "Release Payment" to transfer funds to the host.</p>
-                                </div>
-                            </TooltipContent>
-                        </Tooltip>
-                    </TooltipProvider>
-                </div>
-
-                <div className="flex gap-2 flex-wrap">
-                    {/* Release Payment Button (Host or Guest, after check-in) */}
-                    {booking.status === "confirmed" && (
-                        <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                                <div title={!canRelease ? (
-                                    currentBlockHeight < booking.checkIn ? `Available after check-in (Block ${booking.checkIn})` :
-                                        booking.escrowedAmount <= 0 ? "No funds in escrow" :
-                                            "Release Payment"
-                                ) : undefined}>
-                                    <Button
-                                        size="sm"
-                                        className="gradient-hero"
-                                        disabled={isProcessing || !canRelease}
-                                    >
-                                        <CheckCircle className="w-3 h-3 mr-1" />
-                                        Release Payment
-                                    </Button>
-                                </div>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                                <AlertDialogHeader>
-                                    <AlertDialogTitle>Release Payment to Host?</AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                        This will release {(booking.hostPayout / 1_000_000).toFixed(2)} STX to the host and{" "}
-                                        {(booking.platformFee / 1_000_000).toFixed(2)} STX as platform fee. The booking will be marked as completed.
-                                    </AlertDialogDescription>
-                                </AlertDialogHeader>
-                                <AlertDialogFooter>
-                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                                    <AlertDialogAction onClick={handleReleasePayment} disabled={isProcessing}>
-                                        {isProcessing ? "Processing..." : "Confirm Release"}
-                                    </AlertDialogAction>
-                                </AlertDialogFooter>
-                            </AlertDialogContent>
-                        </AlertDialog>
-                    )}
-
-                    {/* Completed State - Payment Released */}
-                    {booking.status === "completed" && (
-                        <Button size="sm" variant="outline" disabled className="bg-muted/50 text-muted-foreground border-dashed">
-                            <CheckCircle className="w-3 h-3 mr-1" />
-                            Payment Released
+                {/* Completed State */}
+                {(bookingStatus === "completed" || isCompleted) && (
+                    <>
+                        <Button size="lg" variant="outline" disabled className="w-full bg-emerald-500/10 border-emerald-500/20">
+                            <CheckCircle className="w-4 h-4 mr-2 text-emerald-500" />
+                            <span className="text-emerald-600 font-medium">Payment Released</span>
                         </Button>
-                    )}
 
-                    {/* Leave Review Button (Completed only) */}
-                    {booking.status === "completed" && (
+                        {/* Leave Review */}
                         <ReviewForm
                             bookingId={booking.id}
                             revieweeAddress={isGuest ? booking.host : booking.guest}
                             onSuccess={onSuccess}
                             trigger={
-                                <Button size="sm" variant="secondary" className="bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20">
-                                    <MessageSquare className="w-3 h-3 mr-1" />
-                                    Leave Review
+                                <Button size="lg" variant="secondary" className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20">
+                                    <MessageSquare className="w-4 h-4 mr-2" />
+                                    Leave a Review
                                 </Button>
                             }
                         />
-                    )}
+                    </>
+                )}
 
-                    {/* Cancel Booking Button (Guest or Host, before check-in) */}
-                    {canCancel && (
-                        <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                                <Button size="sm" variant="destructive" disabled={isProcessing}>
-                                    <XCircle className="w-3 h-3 mr-1" />
-                                    Cancel Booking
-                                </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                                <AlertDialogHeader>
-                                    <AlertDialogTitle>Cancel This Booking?</AlertDialogTitle>
-                                    <AlertDialogDescription className="space-y-2">
-                                        <p>
-                                            Based on the cancellation policy, you will receive a <strong>{refundPercentage}% refund</strong> (
-                                            {refundAmount.toFixed(2)} STX).
-                                        </p>
-                                        {refundPercentage < 100 && (
-                                            <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                                                <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5" />
-                                                <div className="text-sm">
-                                                    <p className="font-semibold text-amber-500">Cancellation Fee Applied</p>
-                                                    <p className="text-muted-foreground">
-                                                        Cancelling {daysUntilCheckIn} {daysUntilCheckIn === 1 ? "day" : "days"} before check-in results in a{" "}
-                                                        {100 - refundPercentage}% fee.
-                                                    </p>
-                                                </div>
+                {/* Cancel Booking - Always visible for confirmed bookings */}
+                {booking.status === "confirmed" && (
+                    <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                            <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={!canCancel || isProcessing}
+                                className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
+                            >
+                                <XCircle className="w-3 h-3 mr-2" />
+                                {canCancel ? `Cancel Booking (${refundPercentage}% refund)` : "Cannot Cancel"}
+                            </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>Cancel This Booking?</AlertDialogTitle>
+                                <AlertDialogDescription className="space-y-3">
+                                    <p>
+                                        You will receive a <strong>{refundPercentage}% refund</strong> ({refundAmount.toFixed(2)} STX).
+                                    </p>
+                                    {refundPercentage < 100 && (
+                                        <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
+                                            <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                                            <div className="text-sm">
+                                                <p className="font-semibold text-amber-600">Cancellation Fee</p>
+                                                <p className="text-muted-foreground">
+                                                    Cancelling {timeUntilCheckIn.days > 0 ? `${timeUntilCheckIn.days} days` : `${timeUntilCheckIn.hours} hours`} before check-in
+                                                    results in a {100 - refundPercentage}% fee.
+                                                </p>
                                             </div>
-                                        )}
-                                    </AlertDialogDescription>
-                                </AlertDialogHeader>
-                                <AlertDialogFooter>
-                                    <AlertDialogCancel>Keep Booking</AlertDialogCancel>
-                                    <AlertDialogAction onClick={handleCancelBooking} disabled={isProcessing} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                                        {isProcessing ? "Processing..." : "Confirm Cancellation"}
-                                    </AlertDialogAction>
-                                </AlertDialogFooter>
-                            </AlertDialogContent>
-                        </AlertDialog>
-                    )}
-                </div>
+                                        </div>
+                                    )}
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>Keep Booking</AlertDialogCancel>
+                                <AlertDialogAction
+                                    onClick={handleCancelBooking}
+                                    disabled={isProcessing}
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                >
+                                    {isProcessing ? "Processing..." : "Confirm Cancellation"}
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
+                )}
             </div>
         </div>
     );

@@ -8,6 +8,7 @@ import {
 } from "@stacks/transactions";
 
 import { CONTRACT_ADDRESS, CONTRACTS, NETWORK } from './config';
+import { rateLimiter } from './rate-limiter';
 
 // Badge Types Constants (matching the contract)
 export const BADGE_TYPES = {
@@ -81,14 +82,14 @@ export async function mintBadge({
  */
 export async function getBadgeMetadata(badgeId: number): Promise<BadgeMetadata | null> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-badge-metadata",
             functionArgs: [uintCV(badgeId)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type === ClarityType.OptionalNone) {
             return null;
@@ -99,11 +100,19 @@ export async function getBadgeMetadata(badgeId: number): Promise<BadgeMetadata |
         }
 
         const data = cvToValue(result.value);
+        console.log(`🔍 getBadgeMetadata(${badgeId}) raw data:`, data);
+
+        // Handle potential object structure
+        const badgeTypeRaw = data["badge-type"];
+        const earnedAtRaw = data["earned-at"];
+
+        const badgeType = typeof badgeTypeRaw === 'object' && badgeTypeRaw?.value ? badgeTypeRaw.value : badgeTypeRaw;
+        const earnedAt = typeof earnedAtRaw === 'object' && earnedAtRaw?.value ? earnedAtRaw.value : earnedAtRaw;
 
         return {
-            badgeType: Number(data["badge-type"]),
+            badgeType: Number(badgeType),
             owner: data.owner,
-            earnedAt: Number(data["earned-at"]),
+            earnedAt: Number(earnedAt),
             metadataUri: data["metadata-uri"],
         };
     } catch (error) {
@@ -117,14 +126,14 @@ export async function getBadgeMetadata(badgeId: number): Promise<BadgeMetadata |
  */
 export async function hasBadge(user: string, badgeType: number): Promise<boolean> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "has-badge",
             functionArgs: [principalCV(user), uintCV(badgeType)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         return result.type === ClarityType.BoolTrue;
     } catch (error) {
@@ -141,14 +150,14 @@ export async function getUserBadge(
     badgeType: number
 ): Promise<UserBadge | null> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-user-badge",
             functionArgs: [principalCV(user), uintCV(badgeType)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type === ClarityType.OptionalNone) {
             return null;
@@ -159,13 +168,21 @@ export async function getUserBadge(
         }
 
         const data = cvToValue(result.value);
+        console.log(`🔍 getUserBadge(${user}, ${badgeType}) raw data:`, data);
+
+        // Handle potential object structure from cvToValue
+        const badgeIdRaw = data["badge-id"];
+        const earnedRaw = data.earned;
+
+        const badgeId = typeof badgeIdRaw === 'object' && badgeIdRaw?.value ? badgeIdRaw.value : badgeIdRaw;
+        const earned = typeof earnedRaw === 'object' && earnedRaw?.value ? earnedRaw.value : earnedRaw;
 
         return {
-            badgeId: Number(data["badge-id"]),
-            earned: data.earned,
+            badgeId: Number(badgeId),
+            earned: earned === true || earned === 'true',
         };
     } catch (error) {
-        console.error("Error fetching user badge:", error);
+        // console.error("Error fetching user badge:", error);
         return null;
     }
 }
@@ -175,14 +192,14 @@ export async function getUserBadge(
  */
 export async function getBadgeTypeInfo(badgeType: number): Promise<BadgeTypeInfo | null> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-badge-type-info",
             functionArgs: [uintCV(badgeType)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type === ClarityType.OptionalNone) {
             return null;
@@ -201,7 +218,7 @@ export async function getBadgeTypeInfo(badgeType: number): Promise<BadgeTypeInfo
             active: data.active,
         };
     } catch (error) {
-        console.error("Error fetching badge type info:", error);
+        console.error(`Error fetching badge type info for ${badgeType}:`, error);
         return null;
     }
 }
@@ -211,14 +228,14 @@ export async function getBadgeTypeInfo(badgeType: number): Promise<BadgeTypeInfo
  */
 export async function getOwner(badgeId: number): Promise<string | null> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-owner",
             functionArgs: [uintCV(badgeId)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type !== ClarityType.ResponseOk) {
             return null;
@@ -243,14 +260,14 @@ export async function getOwner(badgeId: number): Promise<string | null> {
  */
 export async function getTokenUri(badgeId: number): Promise<string | null> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-token-uri",
             functionArgs: [uintCV(badgeId)],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type !== ClarityType.ResponseOk) {
             return null;
@@ -275,14 +292,14 @@ export async function getTokenUri(badgeId: number): Promise<string | null> {
  */
 export async function getTotalBadges(): Promise<number> {
     try {
-        const result = await fetchCallReadOnlyFunction({
+        const result = await rateLimiter.add(() => fetchCallReadOnlyFunction({
             contractAddress: CONTRACT_ADDRESS,
             contractName: CONTRACTS.BADGE,
             functionName: "get-total-badges",
             functionArgs: [],
             senderAddress: CONTRACT_ADDRESS,
             network: NETWORK,
-        });
+        }));
 
         if (result.type !== ClarityType.ResponseOk) {
             return 0;
@@ -302,23 +319,32 @@ export async function getTotalBadges(): Promise<number> {
 
 export async function getAllUserBadges(user: string): Promise<(BadgeMetadata & { id: number })[]> {
     try {
-        // Check all badge types in parallel
-        const badgePromises = Object.values(BADGE_TYPES).map(async (badgeType) => {
-            const userBadge = await getUserBadge(user, badgeType);
+        const results: (BadgeMetadata & { id: number })[] = [];
+        const badgeTypes = Object.values(BADGE_TYPES);
+
+        // Fetch in parallel using Promise.all
+        const userBadges = await Promise.all(
+            badgeTypes.map(async (badgeType) => {
+                const userBadge = await getUserBadge(user, badgeType);
+                console.log(`🔍 Checking badge type ${badgeType} for user ${user}:`, userBadge);
+                return userBadge;
+            })
+        );
+
+        // Process results
+        for (const userBadge of userBadges) {
             if (userBadge && userBadge.earned) {
                 const metadata = await getBadgeMetadata(userBadge.badgeId);
                 if (metadata) {
-                    return {
+                    results.push({
                         id: userBadge.badgeId,
                         ...metadata,
-                    };
+                    });
                 }
             }
-            return null;
-        });
+        }
 
-        const results = await Promise.all(badgePromises);
-        return results.filter((b): b is (BadgeMetadata & { id: number }) => b !== null);
+        return results;
     } catch (error) {
         console.error("Error fetching all user badges:", error);
         return [];
@@ -330,19 +356,22 @@ export async function getAllUserBadges(user: string): Promise<(BadgeMetadata & {
  */
 export async function getAllBadgeTypes(): Promise<(BadgeTypeInfo & { type: BadgeType })[]> {
     try {
-        const typePromises = Object.values(BADGE_TYPES).map(async (type) => {
+        const results: (BadgeTypeInfo & { type: BadgeType })[] = [];
+        const types = Object.values(BADGE_TYPES);
+
+        // Fetch sequentially to avoid rate limits
+        for (const type of types) {
             const info = await getBadgeTypeInfo(type);
             if (info) {
-                return {
+                results.push({
                     type: type as BadgeType,
                     ...info,
-                };
+                });
             }
-            return null;
-        });
+            // Rate limiter handles delay
+        }
 
-        const results = await Promise.all(typePromises);
-        return results.filter((t): t is (BadgeTypeInfo & { type: BadgeType }) => t !== null);
+        return results;
     } catch (error) {
         console.error("Error fetching all badge types:", error);
         return [];
